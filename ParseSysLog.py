@@ -7,35 +7,27 @@ import datetime
 import time
 import os.path
 
-host = 'mongodb://127.0.0.1:27017/'
-cert = '/home/antonf/egitest.pem'
-cacert = '/home/antonf/ca.pem'
 syslog = "/var/log/syslog"
-
 client = MongoClient('127.0.0.1:27017')
 db = client.firewall
 iptables = db.iptables
-lastproc = db.history
+history = db.history
 
-
+# Het the year from the file
 filetimestamp = time.ctime(os.path.getmtime(syslog))
-#print "last modified: " , filetimestamp
-
 ts1 = time.strptime(filetimestamp, "%a %b %d %H:%M:%S %Y")
-
-# print "ts1 ", ts1
-
-#print "year : ", ts1.tm_year 
 year = ts1.tm_year
 
+# Open the file
 pfile = open(syslog,"r") 
 
+# Read the database history collection and get the timestamp of the last record
+# processed so that we do not duplicate records
 def GetLastDate():
    try:
-      temp = lastproc.find({'file': syslog}, {'pto': 1}).limit(1).sort("_id", -1)
+      temp = history.find({'file': syslog}, {'pto': 1}).limit(1).sort("_id", -1)
       td = None
       for c in temp:
-         #print "Record ", c
          td = c['pto']
       return td
    except:
@@ -43,20 +35,19 @@ def GetLastDate():
       print "An Error occured in GetLastDate : %s" % e
       return None
 
+# Set the last record timestamp in the history collection
 def SetLastDate(dt):
-   # return lastproc.insert({"file": syslog, "pto": dt})
-   return lastproc.update({"file": syslog},{'$set': {"pto": dt}}, upsert=True)
+   return history.update({"file": syslog},{'$set': {"pto": dt}}, upsert=True)
 
+# Parse the date of the record into a timestamp
 def GetRecordDate(r):
-   # print "Processing ", r[0], r[1], r[2]
    month = getMonth(r[0])
-   day = r[1]
-   # print "Month: %s-%s-%s %s" % (r[1], month, year, r[2]) 
    dts = r[1]+"-"+month+"-"+str(year)+" "+r[2]
    dt = time.strptime(dts , "%d-%m-%Y %H:%M:%S")
-   # print "Time tupple " , dt
    return datetime.datetime(dt.tm_year, dt.tm_mon, dt.tm_mday, dt.tm_hour, dt.tm_min, dt.tm_sec)   
 
+# Simple Month Conversion
+# Not Really Needed
 def getMonth(m):
    if(m == "Jan"):
      return "01"
@@ -85,6 +76,7 @@ def getMonth(m):
    else :
      return None
 
+# Splits out the Rule Name and the Input Interface
 def GetIN(r):
    res = []
    s = r.split("=")
@@ -95,10 +87,6 @@ def GetIN(r):
    res.append(x[1])
    return res
 
-def GetOUT(r):
-    s = r[7].split("=")
-    return s[1]
-
 def getValue(r):
    return r.split("=")
 
@@ -107,41 +95,49 @@ def run():
     last_date = GetLastDate()
     rc = 0
     ra = 0
+    rdate = None
+    # Loop through
+    # Syslog
     for line in pfile:
-       rc += 1
-       line = line.rstrip()
-       if re.search("IN", line) is not None and re.search("OUT", line) is not None:
-          Request = line.split(' ')
-          #print "Processing line : ", Request
-          rdate = GetRecordDate(Request)
-	  if (last_date is None or rdate > last_date ):
-             #print "Exclude Lime for Input ", re.search("IN", Request[6]), Request[6]
-             if (re.search("IN", Request[6]) is None):
-                 #print "Pass"
-                 continue
-             ra += 1
-             x = GetIN(Request[6])
-             r = 0
-             rec = {}
-	     rec["rule"] = x[1]
-          
-             rec[x[2].lower()] = x[0]
-          
-             rec['date_action'] = rdate
-             rec['created_at'] = datetime.datetime.now()
-             for ar in Request :
-                if (r > 6):
-                   tval = getValue(ar)
+      rc += 1
+      line = line.rstrip()
 
-                   # print "TVAL : ", tval
-                   if len(tval) == 1:
-                      tval.append("")
+      # Identify IPTable logs
+      if re.search("IN", line) is not None and re.search("OUT", line) is not None:
+        #Split the logs
+        Request = line.split(' ')
+        # Parse the timestamp of the record
+        rdate = GetRecordDate(Request)
 
-                   rec[tval[0].lower()] = tval[1]
-                r += 1
-                 
-             iptables.insert(rec)
+        # If the Timestamp is > last Record Date then process this record
+        if last_date is None or rdate > last_date :
+          # Validate that this record is no malformed and everything is where we expect it to be 
+          if (re.search("IN", Request[6]) is None):
+            continue
 
+            ra += 1
+            # Get IN and Rule
+            x = GetIN(Request[6])
+            r = 0
+            rec = {}
+            rec["rule"] = x[1]
+            rec[x[2].lower()] = x[0]
+            rec['date_action'] = rdate
+            rec['created_at'] = datetime.datetime.now()
+            # Loop through the rest of the fields and add them to the record
+            for ar in Request :
+              if (r > 6):
+                tval = getValue(ar)
+                #Deal with Blank entities
+                if len(tval) == 1:
+                  tval.append("")
+
+                  rec[tval[0].lower()] = tval[1]
+              r += 1
+            # Insert the record    
+            iptables.insert(rec)
+
+    # Update the Last record timestamp
     SetLastDate(rdate)
     print "Processed %d records and used %d records" % (rc, ra)
 
